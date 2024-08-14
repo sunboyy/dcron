@@ -1,6 +1,7 @@
 package dcron
 
 import (
+	"context"
 	"log"
 	"time"
 
@@ -14,15 +15,17 @@ const lockTimeout = time.Minute * 5
 type distributedJob struct {
 	jobScheduleRepository JobScheduleRepository
 	jobSchedule           JobSchedule
+	instanceID            string
 	job                   cron.Job
 }
 
 func newDistributedJob(repo JobScheduleRepository, jobSchedule JobSchedule,
-	job cron.Job) *distributedJob {
+	instanceID string, job cron.Job) *distributedJob {
 
 	return &distributedJob{
 		jobScheduleRepository: repo,
 		jobSchedule:           jobSchedule,
+		instanceID:            instanceID,
 		job:                   job,
 	}
 }
@@ -41,8 +44,11 @@ func (j *distributedJob) Run() {
 }
 
 func (j *distributedJob) acquireLock() bool {
-	locked, err := j.jobScheduleRepository.AcquireLock(j.jobSchedule.ID,
-		lockTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), lockTimeout)
+	defer cancel()
+
+	locked, err := j.jobScheduleRepository.AcquireLock(ctx, j.instanceID,
+		j.jobSchedule.ID, lockTimeout)
 	if err != nil {
 		log.Println("Error acquiring lock:", err)
 	}
@@ -51,8 +57,12 @@ func (j *distributedJob) acquireLock() bool {
 
 func (j *distributedJob) releaseLock() {
 	schedule, _ := Parser.Parse(j.jobSchedule.CronExpression)
-	if err := j.jobScheduleRepository.ReleaseLock(j.jobSchedule.ID,
-		schedule.Next(time.Now())); err != nil {
+
+	ctx, cancel := context.WithTimeout(context.Background(), lockTimeout)
+	defer cancel()
+
+	if err := j.jobScheduleRepository.ReleaseLock(ctx, j.instanceID,
+		j.jobSchedule.ID, schedule.Next(time.Now())); err != nil {
 
 		log.Println("Error releasing lock:", err)
 	}

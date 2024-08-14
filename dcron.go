@@ -2,6 +2,8 @@ package dcron
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -22,11 +24,12 @@ type Dcron struct {
 	jobBuilders           map[string]JobBuilder
 	jobScheduleRepository JobScheduleRepository
 	cron                  *cron.Cron
+	instanceID            string
 	running               bool
 	runningMu             sync.Mutex
 	updateMu              sync.Mutex
 	logger                cron.Logger
-	scheduleEntryID       map[uint]cron.EntryID
+	scheduleEntryID       map[uint64]cron.EntryID
 }
 
 func New(jobScheduleRepository JobScheduleRepository) *Dcron {
@@ -34,12 +37,19 @@ func New(jobScheduleRepository JobScheduleRepository) *Dcron {
 		jobBuilders:           make(map[string]JobBuilder),
 		jobScheduleRepository: jobScheduleRepository,
 		cron:                  cron.New(),
-		logger:                cron.PrintfLogger(log.New(os.Stdout, "[DCRON] ", log.LstdFlags)),
-		scheduleEntryID:       make(map[uint]cron.EntryID),
+		instanceID:            generateInstanceID(),
+		logger:                cron.VerbosePrintfLogger(log.New(os.Stdout, "[DCRON] ", log.LstdFlags)),
+		scheduleEntryID:       make(map[uint64]cron.EntryID),
 	}
 
 	dcron.cron.Schedule(cron.Every(pollingInterval), cron.FuncJob(dcron.pollingUpdate))
 	return dcron
+}
+
+func generateInstanceID() string {
+	randomBytes := make([]byte, 8)
+	_, _ = rand.Read(randomBytes)
+	return hex.EncodeToString(randomBytes)
 }
 
 func (s *Dcron) RegisterJobBuilder(name string, builder JobBuilder) {
@@ -60,7 +70,7 @@ func (s *Dcron) Start() {
 	s.cron.Start()
 	s.running = true
 
-	s.logger.Info("Started")
+	s.logger.Info("Started", "instanceID", s.instanceID)
 }
 
 func (s *Dcron) pollingUpdate() {
@@ -75,7 +85,7 @@ func (s *Dcron) pollingUpdate() {
 	}
 
 	// Create a set of new job schedule IDs for quick lookup
-	newJobScheduleIDSet := make(map[uint]struct{}, len(newJobSchedules))
+	newJobScheduleIDSet := make(map[uint64]struct{}, len(newJobSchedules))
 	for _, jobSchedule := range newJobSchedules {
 		newJobScheduleIDSet[jobSchedule.ID] = struct{}{}
 	}
@@ -111,7 +121,8 @@ func (s *Dcron) scheduleJob(jobSchedule JobSchedule) {
 		return
 	}
 
-	entryID := s.cron.Schedule(schedule, newDistributedJob(s.jobScheduleRepository, jobSchedule, job))
+	entryID := s.cron.Schedule(schedule,
+		newDistributedJob(s.jobScheduleRepository, jobSchedule, s.instanceID, job))
 	s.scheduleEntryID[jobSchedule.ID] = entryID
 
 	s.logger.Info("Scheduled job", "key", jobSchedule.Key, "cronExpression", jobSchedule.CronExpression)
@@ -126,7 +137,7 @@ func (s *Dcron) buildJob(name string, params JobParameters) (cron.Job, error) {
 	return builder(params), nil
 }
 
-func (s *Dcron) unschedule(id uint) {
+func (s *Dcron) unschedule(id uint64) {
 	if entryID, exists := s.scheduleEntryID[id]; exists {
 		s.cron.Remove(entryID)
 		delete(s.scheduleEntryID, id)

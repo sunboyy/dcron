@@ -1,17 +1,18 @@
 package dcron
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 type JobParameters string
 
 type JobSchedule struct {
-	ID             uint
+	ID             uint64
 	Key            string
 	JobName        string
 	Params         JobParameters
 	CronExpression string
-	NextRunAt      *time.Time
-	LockExpiredAt  *time.Time
 }
 
 // JobScheduleRepository is an interface for a repository that manages job
@@ -38,9 +39,11 @@ type JobScheduleRepository interface {
 	// 2. The job is already scheduled to run at a later time.
 	// 3. The job schedule is deleted.
 	// 4. An error occurs while updating the database.
-	AcquireLock(scheduleID uint, timeout time.Duration) (bool, error)
+	AcquireLock(ctx context.Context, instanceID string, scheduleID uint64,
+		timeout time.Duration) (bool, error)
 
 	// ReleaseLock resets the lock acquired time of the job schedule to nil while
 	// also updating the next run time to prevent the job from re-running.
-	ReleaseLock(scheduleID uint, nextRunAt time.Time) error
+	ReleaseLock(ctx context.Context, instanceID string, scheduleID uint64,
+		nextRunAt time.Time) error
 }
