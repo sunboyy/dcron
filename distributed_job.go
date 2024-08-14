@@ -7,6 +7,8 @@ import (
 	"github.com/robfig/cron/v3"
 )
 
+const lockTimeout = time.Minute * 5
+
 // distributedJob is a wrapper around a cron.Job that manages the locking
 // mechanism to allow distributed execution.
 type distributedJob struct {
@@ -39,7 +41,8 @@ func (j *distributedJob) Run() {
 }
 
 func (j *distributedJob) acquireLock() bool {
-	locked, err := j.jobScheduleRepository.AcquireLock(j.jobSchedule.ID)
+	locked, err := j.jobScheduleRepository.AcquireLock(j.jobSchedule.ID,
+		lockTimeout)
 	if err != nil {
 		log.Println("Error acquiring lock:", err)
 	}

@@ -2,8 +2,10 @@ package dcron
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"os"
 	"sync"
 	"time"
 
@@ -20,8 +22,10 @@ type Dcron struct {
 	jobBuilders           map[string]JobBuilder
 	jobScheduleRepository JobScheduleRepository
 	cron                  *cron.Cron
-	mu                    sync.Mutex
 	running               bool
+	runningMu             sync.Mutex
+	updateMu              sync.Mutex
+	logger                cron.Logger
 	scheduleEntryID       map[uint]cron.EntryID
 }
 
@@ -30,6 +34,7 @@ func New(jobScheduleRepository JobScheduleRepository) *Dcron {
 		jobBuilders:           make(map[string]JobBuilder),
 		jobScheduleRepository: jobScheduleRepository,
 		cron:                  cron.New(),
+		logger:                cron.PrintfLogger(log.New(os.Stdout, "[DCRON] ", log.LstdFlags)),
 		scheduleEntryID:       make(map[uint]cron.EntryID),
 	}
 
@@ -38,14 +43,14 @@ func New(jobScheduleRepository JobScheduleRepository) *Dcron {
 }
 
 func (s *Dcron) RegisterJobBuilder(name string, builder JobBuilder) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.updateMu.Lock()
+	defer s.updateMu.Unlock()
 	s.jobBuilders[name] = builder
 }
 
 func (s *Dcron) Start() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.runningMu.Lock()
+	defer s.runningMu.Unlock()
 
 	if s.running {
 		return
@@ -55,17 +60,17 @@ func (s *Dcron) Start() {
 	s.cron.Start()
 	s.running = true
 
-	log.Println("Dcron started")
+	s.logger.Info("Started")
 }
 
 func (s *Dcron) pollingUpdate() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.updateMu.Lock()
+	defer s.updateMu.Unlock()
 
-	log.Println("Polling for updates")
+	s.logger.Info("Polling for updates")
 	newJobSchedules, err := s.jobScheduleRepository.FindAll()
 	if err != nil {
-		log.Println("Failed to fetch job schedules:", err)
+		s.logger.Error(err, "Failed to fetch job schedules")
 		return
 	}
 
@@ -88,47 +93,44 @@ func (s *Dcron) pollingUpdate() {
 	}
 }
 
-func (s *Dcron) scheduleJob(jobSchedule JobSchedule) error {
+func (s *Dcron) scheduleJob(jobSchedule JobSchedule) {
 	if _, exists := s.scheduleEntryID[jobSchedule.ID]; exists {
-		return nil // Already scheduled
+		return // Already scheduled
 	}
 
 	schedule, err := Parser.Parse(jobSchedule.CronExpression)
 	if err != nil {
-		return fmt.Errorf("failed to parse cron expression %s: %w",
-			jobSchedule.CronExpression, err)
+		s.logger.Error(err, "Failed to parse cron expression",
+			"cronExpression", jobSchedule.CronExpression)
+		return
 	}
 
-	job, ok := s.buildJob(jobSchedule.JobName, jobSchedule.Params)
-	if !ok {
-		return fmt.Errorf("failed to build job %s", jobSchedule.JobName)
+	job, err := s.buildJob(jobSchedule.JobName, jobSchedule.Params)
+	if err != nil {
+		s.logger.Error(err, "Failed to build job", "jobName", jobSchedule.JobName)
+		return
 	}
 
 	entryID := s.cron.Schedule(schedule, newDistributedJob(s.jobScheduleRepository, jobSchedule, job))
 	s.scheduleEntryID[jobSchedule.ID] = entryID
 
-	log.Printf("Scheduled job %s with cron expression %s", jobSchedule.Key, jobSchedule.CronExpression)
-	return nil
+	s.logger.Info("Scheduled job", "key", jobSchedule.Key, "cronExpression", jobSchedule.CronExpression)
 }
 
-func (s *Dcron) buildJob(name string, params JobParameters) (cron.Job, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
+func (s *Dcron) buildJob(name string, params JobParameters) (cron.Job, error) {
 	builder, exists := s.jobBuilders[name]
 	if !exists {
-		log.Printf("No job builder found for job name %s", name)
-		return nil, false
+		return nil, errors.New("no job builder found")
 	}
 
-	return builder(params), true
+	return builder(params), nil
 }
 
 func (s *Dcron) unschedule(id uint) {
 	if entryID, exists := s.scheduleEntryID[id]; exists {
 		s.cron.Remove(entryID)
 		delete(s.scheduleEntryID, id)
-		log.Printf("Unscheduled job with ID %d", id)
+		s.logger.Info("Unscheduled job", "id", id)
 	}
 }
 
@@ -137,13 +139,16 @@ func (s *Dcron) Schedule(key, spec, jobName string, params JobParameters) error 
 		return fmt.Errorf("failed to parse cron expression %s: %w", spec, err)
 	}
 
+	s.updateMu.Lock()
+	defer s.updateMu.Unlock()
+
 	jobSchedule, err := s.jobScheduleRepository.Insert(key, spec, jobName, params)
 	if err != nil {
 		return err
 	}
 
 	if s.running {
-		return s.scheduleJob(jobSchedule)
+		s.scheduleJob(jobSchedule)
 	}
 
 	return nil
@@ -155,15 +160,19 @@ func (s *Dcron) Unschedule(key string) error {
 		return err
 	}
 
+	s.updateMu.Lock()
+	defer s.updateMu.Unlock()
+
 	s.unschedule(jobSchedule.ID)
 	return s.jobScheduleRepository.DeleteByKey(key)
 }
 
 func (s *Dcron) Stop() context.Context {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.runningMu.Lock()
+	defer s.runningMu.Unlock()
 
 	s.running = false
-	log.Println("Dcron stopped")
+	s.logger.Info("Stopping")
+
 	return s.cron.Stop()
 }

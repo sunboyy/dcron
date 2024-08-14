@@ -11,7 +11,7 @@ type JobSchedule struct {
 	Params         JobParameters
 	CronExpression string
 	NextRunAt      *time.Time
-	LockAcquiredAt *time.Time
+	LockExpiredAt  *time.Time
 }
 
 // JobScheduleRepository is an interface for a repository that manages job
@@ -38,7 +38,7 @@ type JobScheduleRepository interface {
 	// 2. The job is already scheduled to run at a later time.
 	// 3. The job schedule is deleted.
 	// 4. An error occurs while updating the database.
-	AcquireLock(scheduleID uint) (bool, error)
+	AcquireLock(scheduleID uint, timeout time.Duration) (bool, error)
 
 	// ReleaseLock resets the lock acquired time of the job schedule to nil while
 	// also updating the next run time to prevent the job from re-running.
