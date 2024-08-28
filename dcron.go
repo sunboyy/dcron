@@ -18,7 +18,7 @@ const pollingInterval = time.Minute
 
 var Parser = cron.NewParser(cron.Second | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 
-type JobBuilder func(params JobParameters) cron.Job
+type JobBuilder func(params JobParameters) (cron.Job, error)
 
 type Dcron struct {
 	jobBuilders           map[string]JobBuilder
@@ -29,7 +29,7 @@ type Dcron struct {
 	runningMu             sync.Mutex
 	updateMu              sync.Mutex
 	logger                cron.Logger
-	scheduleEntryID       map[uint64]cron.EntryID
+	scheduleEntryID       map[int64]cron.EntryID
 }
 
 func New(jobScheduleRepository JobScheduleRepository) *Dcron {
@@ -39,7 +39,7 @@ func New(jobScheduleRepository JobScheduleRepository) *Dcron {
 		cron:                  cron.New(),
 		instanceID:            generateInstanceID(),
 		logger:                cron.VerbosePrintfLogger(log.New(os.Stdout, "[DCRON] ", log.LstdFlags)),
-		scheduleEntryID:       make(map[uint64]cron.EntryID),
+		scheduleEntryID:       make(map[int64]cron.EntryID),
 	}
 
 	dcron.cron.Schedule(cron.Every(pollingInterval), cron.FuncJob(dcron.pollingUpdate))
@@ -85,7 +85,7 @@ func (s *Dcron) pollingUpdate() {
 	}
 
 	// Create a set of new job schedule IDs for quick lookup
-	newJobScheduleIDSet := make(map[uint64]struct{}, len(newJobSchedules))
+	newJobScheduleIDSet := make(map[int64]struct{}, len(newJobSchedules))
 	for _, jobSchedule := range newJobSchedules {
 		newJobScheduleIDSet[jobSchedule.ID] = struct{}{}
 	}
@@ -134,15 +134,29 @@ func (s *Dcron) buildJob(name string, params JobParameters) (cron.Job, error) {
 		return nil, errors.New("no job builder found")
 	}
 
-	return builder(params), nil
+	job, err := builder(params)
+	if err != nil {
+		return nil, fmt.Errorf("build job: %w", err)
+	}
+
+	return job, nil
 }
 
-func (s *Dcron) unschedule(id uint64) {
+func (s *Dcron) unschedule(id int64) {
 	if entryID, exists := s.scheduleEntryID[id]; exists {
 		s.cron.Remove(entryID)
 		delete(s.scheduleEntryID, id)
 		s.logger.Info("Unscheduled job", "id", id)
 	}
+}
+
+func (s *Dcron) IsScheduled(key string) (bool, error) {
+	jobSchedule, err := s.jobScheduleRepository.FindByKey(key)
+	if err != nil {
+		return false, fmt.Errorf("find job schedule by key: %w", err)
+	}
+
+	return jobSchedule != nil, nil
 }
 
 func (s *Dcron) Schedule(key, spec, jobName string, params JobParameters) error {
@@ -176,6 +190,26 @@ func (s *Dcron) Unschedule(key string) error {
 
 	s.unschedule(jobSchedule.ID)
 	return s.jobScheduleRepository.DeleteByKey(key)
+}
+
+func (s *Dcron) Reschedule(key, spec, jobName string, params JobParameters) error {
+	if _, err := Parser.Parse(spec); err != nil {
+		return fmt.Errorf("failed to parse cron expression %s: %w", spec, err)
+	}
+
+	s.updateMu.Lock()
+	defer s.updateMu.Unlock()
+
+	jobSchedule, err := s.jobScheduleRepository.Upsert(key, spec, jobName, params)
+	if err != nil {
+		return err
+	}
+
+	if s.running {
+		s.scheduleJob(jobSchedule)
+	}
+
+	return nil
 }
 
 func (s *Dcron) Stop() context.Context {

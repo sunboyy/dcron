@@ -5,10 +5,10 @@ import (
 	"time"
 )
 
-type JobParameters string
+type JobParameters map[string]interface{}
 
 type JobSchedule struct {
-	ID             uint64
+	ID             int64
 	Key            string
 	JobName        string
 	Params         JobParameters
@@ -23,11 +23,16 @@ type JobScheduleRepository interface {
 
 	// FindByKey finds the job schedule with the given key. It returns the job
 	// schedule and an error if the job schedule is not found.
-	FindByKey(key string) (JobSchedule, error)
+	FindByKey(key string) (*JobSchedule, error)
 
 	// Insert inserts a new job schedule with the given key, cron expression,
 	// job name, and parameters. It returns the inserted job schedule.
 	Insert(key, spec, jobName string, params JobParameters) (JobSchedule, error)
+
+	// Upsert inserts a new job schedule with the given key, cron expression,
+	// job name, and parameters. If the job schedule already exists, it updates
+	// the existing job schedule. It returns the inserted job schedule.
+	Upsert(key, spec, jobName string, params JobParameters) (JobSchedule, error)
 
 	// DeleteByKey deletes the job schedule with the given key.
 	DeleteByKey(key string) error
@@ -39,11 +44,11 @@ type JobScheduleRepository interface {
 	// 2. The job is already scheduled to run at a later time.
 	// 3. The job schedule is deleted.
 	// 4. An error occurs while updating the database.
-	AcquireLock(ctx context.Context, instanceID string, scheduleID uint64,
+	AcquireLock(ctx context.Context, instanceID string, scheduleID int64,
 		timeout time.Duration) (bool, error)
 
 	// ReleaseLock resets the lock acquired time of the job schedule to nil while
 	// also updating the next run time to prevent the job from re-running.
-	ReleaseLock(ctx context.Context, instanceID string, scheduleID uint64,
+	ReleaseLock(ctx context.Context, instanceID string, scheduleID int64,
 		nextRunAt time.Time) error
 }
